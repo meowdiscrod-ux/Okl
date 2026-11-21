@@ -1,0 +1,705 @@
+name: Build kitty.lia
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write project files
+        run: |
+          cat > 'build.gradle' <<'KITTY_EOF'
+          plugins {
+              id 'fabric-loom' version "${loom_version}"
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+          base { archivesName = project.archives_base_name }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") { expand "version": project.version }
+          }
+
+          tasks.withType(JavaCompile).configureEach { options.release = 21 }
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          KITTY_EOF
+          cat > 'gradle.properties' <<'KITTY_EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.5
+          loader_version=0.19.1
+          loom_version=1.16.3
+          fabric_api_version=0.141.3+1.21.11
+          mod_version=1.0.0
+          maven_group=lia.kitty
+          archives_base_name=kitty.lia
+          KITTY_EOF
+          cat > 'settings.gradle' <<'KITTY_EOF'
+          pluginManagement {
+              resolutionStrategy {
+                  eachPlugin {
+                      if (requested.id.id == 'fabric-loom') {
+                          useModule("net.fabricmc:fabric-loom:${requested.version}")
+                      }
+                  }
+              }
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'kitty-lia'
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Category.java' <<'KITTY_EOF'
+          package lia.kitty;
+          public enum Category {
+              COMBAT("Combat"), MISC("Misc"), MOVEMENT("Movement"), VISUAL("Visual");
+              public final String label;
+              Category(String l) { label = l; }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Combat.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.entity.player.PlayerEntity;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.math.*;
+
+          public final class Combat {
+              static final MinecraftClient mc = MinecraftClient.getInstance();
+
+              public static double dist(PlayerEntity e) {
+                  Vec3d eye = mc.player.getEyePos(); Box b = e.getBoundingBox();
+                  double x = MathHelper.clamp(eye.x, b.minX, b.maxX), y = MathHelper.clamp(eye.y, b.minY, b.maxY), z = MathHelper.clamp(eye.z, b.minZ, b.maxZ);
+                  return eye.distanceTo(new Vec3d(x, y, z));
+              }
+              public static float yawTo(PlayerEntity e) {
+                  Vec3d c = e.getBoundingBox().getCenter(); Vec3d eye = mc.player.getEyePos();
+                  return (float) (Math.toDegrees(Math.atan2(c.z - eye.z, c.x - eye.x)) - 90.0);
+              }
+              public static float pitchTo(PlayerEntity e) {
+                  Vec3d c = e.getBoundingBox().getCenter(); Vec3d eye = mc.player.getEyePos();
+                  double h = Math.sqrt((c.x - eye.x) * (c.x - eye.x) + (c.z - eye.z) * (c.z - eye.z));
+                  return (float) -Math.toDegrees(Math.atan2(c.y - eye.y, h));
+              }
+              /** Nearest living player inside range and inside the fov cone. */
+              public static PlayerEntity nearest(double range, double fov) {
+                  PlayerEntity best = null; double bd = Double.MAX_VALUE;
+                  for (PlayerEntity e : mc.world.getPlayers()) {
+                      if (e == mc.player || !e.isAlive() || e.isSpectator()) continue;
+                      double d = dist(e);
+                      if (d > range) continue;
+                      if (fov < 360 && Math.abs(MathHelper.wrapDegrees(yawTo(e) - mc.player.getYaw())) > fov / 2.0) continue;
+                      if (d < bd) { bd = d; best = e; }
+                  }
+                  return best;
+              }
+              public static void attack(PlayerEntity t) {
+                  mc.interactionManager.attackEntity(mc.player, t);
+                  mc.player.swingHand(Hand.MAIN_HAND);
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Config.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import java.io.*;
+          import java.nio.file.*;
+          import java.util.Properties;
+          import net.fabricmc.loader.api.FabricLoader;
+          public final class Config {
+              static Path file() { return FabricLoader.getInstance().getConfigDir().resolve("kittylia.properties"); }
+              public static void save() {
+                  try {
+                      Properties p = new Properties();
+                      p.setProperty("theme", String.valueOf(Theme.index));
+                      for (Module m : ModuleManager.all) {
+                          if (!m.name.equals("Key Pearl")) p.setProperty(m.name + ".on", String.valueOf(m.enabled));
+                          for (Setting s : m.settings) p.setProperty(m.name + "." + s.name, String.valueOf(s.value));
+                      }
+                      try (OutputStream o = Files.newOutputStream(file())) { p.store(o, "kitty.lia"); }
+                  } catch (Exception ignored) {}
+              }
+              public static void load() {
+                  try {
+                      if (!Files.exists(file())) return;
+                      Properties p = new Properties();
+                      try (InputStream i = Files.newInputStream(file())) { p.load(i); }
+                      Theme.index = Integer.parseInt(p.getProperty("theme", "0")) % Theme.COLS.length;
+                      for (Module m : ModuleManager.all) {
+                          m.enabled = Boolean.parseBoolean(p.getProperty(m.name + ".on", "false"));
+                          for (Setting s : m.settings) {
+                              String v = p.getProperty(m.name + "." + s.name);
+                              if (v != null) s.value = Double.parseDouble(v);
+                          }
+                      }
+                  } catch (Exception ignored) {}
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Fx.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+
+          public final class Fx {
+              static float[] fx = new float[0], fy, fv, fz;
+              static int n;
+              static long last = System.nanoTime();
+              static final java.util.Random rnd = new java.util.Random();
+
+              static Module mod(String name) { for (Module m : ModuleManager.all) if (m.name.equals(name)) return m; return null; }
+              static double val(Module m, String s) { for (Setting x : m.settings) if (x.name.equals(s)) return x.value; return 0; }
+
+              /** In game with no screen open: snow over the whole view, orbit around the crosshair. */
+              public static void hud(DrawContext c) {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (mc.currentScreen != null) return;
+                  snow(c);
+                  orbit(c, c.getScaledWindowWidth() / 2.0, c.getScaledWindowHeight() / 2.0);
+              }
+
+              /** Any screen (title, pause, inventory, kitty.lia GUI): snow plus orbit around the mouse. */
+              public static void screen(DrawContext c, int mx, int my) {
+                  snow(c);
+                  orbit(c, mx, my);
+              }
+
+              static void snow(DrawContext c) {
+                  Module m = mod("Snow");
+                  long now = System.nanoTime();
+                  float dt = Math.min(0.1f, (now - last) / 1e9f);
+                  last = now;
+                  if (m == null || !m.enabled) return;
+                  int want = (int) val(m, "Amount");
+                  if (want != n) {
+                      n = want; fx = new float[n]; fy = new float[n]; fv = new float[n]; fz = new float[n];
+                      for (int i = 0; i < n; i++) { fx[i] = rnd.nextFloat(); fy[i] = rnd.nextFloat(); fv[i] = 0.4f + rnd.nextFloat() * 0.6f; fz[i] = rnd.nextFloat(); }
+                  }
+                  float speed = (float) val(m, "Speed"); int size = (int) val(m, "Size");
+                  int w = c.getScaledWindowWidth(), h = c.getScaledWindowHeight();
+                  double t = now / 1e9;
+                  for (int i = 0; i < n; i++) {
+                      fy[i] += 0.08f * fv[i] * speed * dt;
+                      fx[i] += (float) Math.sin(t * 0.8 + fz[i] * 6.28) * 0.012f * dt;
+                      if (fy[i] > 1f) { fy[i] = -0.02f; fx[i] = rnd.nextFloat(); }
+                      if (fx[i] < 0f) fx[i] += 1f; if (fx[i] > 1f) fx[i] -= 1f;
+                      int s = Math.max(1, Math.round(size * (0.5f + fv[i] * 0.7f)));
+                      int a = 120 + (int) (fv[i] * 120);
+                      int x = (int) (fx[i] * w), y = (int) (fy[i] * h);
+                      c.fill(x, y, x + s, y + s, (a << 24) | 0xFFFFFF);
+                  }
+              }
+
+              static void orbit(DrawContext c, double cx, double cy) {
+                  Module m = mod("Cursor Orbit");
+                  if (m == null || !m.enabled) return;
+                  int dots = (int) val(m, "Dots"); double r = val(m, "Radius"), sp = val(m, "Speed"); int sz = (int) val(m, "Size");
+                  double t = System.nanoTime() / 1e9 * sp;
+                  int rgb = Theme.accent() & 0xFFFFFF;
+                  for (int i = 0; i < dots; i++) {
+                      for (int k = 5; k >= 0; k--) {
+                          double a = t * 2 + i * (Math.PI * 2 / dots) - k * 0.12;
+                          int x = (int) Math.round(cx + Math.cos(a) * r), y = (int) Math.round(cy + Math.sin(a) * r);
+                          int alpha = 255 - k * 40;
+                          int s = Math.max(1, sz - (k > 2 ? 1 : 0));
+                          c.fill(x - s / 2, y - s / 2, x - s / 2 + s, y - s / 2 + s, (alpha << 24) | rgb);
+                      }
+                  }
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/HudRender.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import java.util.*;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.render.RenderTickCounter;
+
+          public final class HudRender {
+              public static void render(DrawContext c, RenderTickCounter tick) {
+                  Fx.hud(c);
+                  if (!ModuleManager.on("Hud")) return;
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (mc.options.hudHidden) return;
+                  var tr = mc.textRenderer; int acc = Theme.accent();
+                  c.fill(4, 4, 6 + tr.getWidth("kitty.lia") + 6, 17, 0x90000000);
+                  c.fill(4, 4, 6, 17, acc);
+                  c.drawText(tr, "kitty.lia", 10, 7, acc, false);
+                  List<String> names = new ArrayList<>();
+                  for (Module m : ModuleManager.all) if (m.enabled && m.cat != Category.VISUAL) names.add(m.name);
+                  names.sort((a, b) -> tr.getWidth(b) - tr.getWidth(a));
+                  int w = c.getScaledWindowWidth(), y = 4;
+                  for (String n : names) {
+                      int tw = tr.getWidth(n);
+                      c.fill(w - tw - 8, y, w - 2, y + 11, 0x80000000);
+                      c.fill(w - 2, y, w, y + 11, acc);
+                      c.drawText(tr, n, w - tw - 5, y + 2, acc, false);
+                      y += 11;
+                  }
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/KittyLia.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+          import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
+          import net.fabricmc.fabric.api.client.screen.v1.Screens;
+          import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.screen.ChatScreen;
+          import net.minecraft.client.gui.screen.GameMenuScreen;
+          import net.minecraft.client.gui.screen.TitleScreen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.ActionResult;
+          import net.minecraft.util.Identifier;
+          import org.lwjgl.glfw.GLFW;
+
+          public class KittyLia implements ClientModInitializer {
+              static boolean shiftWas;
+
+              @Override public void onInitializeClient() {
+                  ModuleManager.init();
+                  Config.load();
+                  ClientTickEvents.END_CLIENT_TICK.register(KittyLia::tick);
+                  AttackEntityCallback.EVENT.register((player, world, hand, entity, hit) -> {
+                      if (world.isClient() && entity instanceof LivingEntity t) Swap.forAttack(t, false);
+                      return ActionResult.PASS;
+                  });
+                  HudElementRegistry.addLast(Identifier.of("kittylia", "hud"), HudRender::render);
+                  // On-screen button for phones (no Right Shift needed) on title + pause menu
+                  ScreenEvents.AFTER_INIT.register((client, screen, w, h) -> {
+                      ScreenEvents.afterRender(screen).register((sc, ctx, mx, my, d) -> Fx.screen(ctx, mx, my));
+                      if (screen instanceof TitleScreen || screen instanceof GameMenuScreen)
+                          Screens.getButtons(screen).add(ButtonWidget.builder(Text.literal("kitty.lia"), b -> client.setScreen(new KittyScreen())).dimensions(4, 4, 64, 20).build());
+                  });
+              }
+
+              static void tick(MinecraftClient mc) {
+                  long h = mc.getWindow().getHandle();
+                  boolean sh = GLFW.glfwGetKey(h, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
+                  if (sh && !shiftWas) {
+                      if (mc.currentScreen instanceof KittyScreen) mc.setScreen(null);
+                      else if (!(mc.currentScreen instanceof ChatScreen)) mc.setScreen(new KittyScreen());
+                  }
+                  shiftWas = sh;
+                  Swap.tick();
+                  if (mc.player == null || mc.world == null) return;
+                  for (Module m : ModuleManager.all) if (m.enabled) m.onTick();
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/KittyScreen.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import java.util.List;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.text.Text;
+          import org.lwjgl.glfw.GLFW;
+
+          /** Original layout: left tab rail, card rows with pill toggles, click a name to expand its sliders. */
+          public class KittyScreen extends Screen {
+              static final int W = 400, H = 250, RAIL = 96, ROW = 26, SL = 22;
+              Category sel = Category.COMBAT;
+              int scroll;
+              boolean wasDown;
+              Setting dragging;
+
+              public KittyScreen() { super(Text.literal("kitty.lia")); }
+              @Override public boolean shouldPause() { return false; }
+              @Override public void removed() { Config.save(); }
+              @Override public boolean mouseScrolled(double x, double y, double hx, double vy) { scroll -= (int) (vy * 16); return true; }
+
+              boolean in(int mx, int my, int x, int y, int w, int h) { return mx >= x && mx < x + w && my >= y && my < y + h; }
+
+              @Override public void render(DrawContext c, int mx, int my, float delta) {
+                  boolean down = GLFW.glfwGetMouseButton(client.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+                  boolean click = down && !wasDown; wasDown = down;
+                  if (!down) dragging = null;
+
+                  int acc = Theme.accent();
+                  int x = (width - W) / 2, y = (height - H) / 2;
+                  c.fill(0, 0, width, height, 0x70000000);
+                  c.fill(x, y, x + W, y + H, 0xF2121016);
+                  c.fill(x, y, x + RAIL, y + H, 0xFF0C0A10);
+                  c.fill(x, y, x + W, y + 2, acc);
+
+                  c.drawText(textRenderer, "kitty.lia", x + 12, y + 12, acc, true);
+                  c.drawText(textRenderer, "1.21.11", x + 12, y + 24, 0xFF77727F, false);
+
+                  // tabs
+                  int i = 0;
+                  for (Category cat : Category.values()) {
+                      int ty = y + 46 + i * 28; boolean s = cat == sel, hov = in(mx, my, x, ty, RAIL, 24);
+                      if (s) { c.fill(x, ty, x + RAIL, ty + 24, 0xFF1C1822); c.fill(x, ty, x + 3, ty + 24, acc); }
+                      else if (hov) c.fill(x, ty, x + RAIL, ty + 24, 0xFF15121A);
+                      c.drawText(textRenderer, cat.label, x + 16, ty + 8, s ? 0xFFFFFFFF : 0xFF9A94A6, false);
+                      if (hov && click) { sel = cat; scroll = 0; }
+                      i++;
+                  }
+                  // theme chip
+                  int cy = y + H - 30; boolean chov = in(mx, my, x + 10, cy, RAIL - 20, 20);
+                  c.fill(x + 10, cy, x + RAIL - 10, cy + 20, chov ? 0xFF241F2C : 0xFF1A1620);
+                  c.fill(x + 14, cy + 6, x + 22, cy + 14, acc);
+                  c.drawText(textRenderer, Theme.name(), x + 28, cy + 6, 0xFFE8E4EE, false);
+                  if (chov && click) { Theme.next(); }
+
+                  // content
+                  int cx = x + RAIL + 10, cw = W - RAIL - 20, top = y + 10, bottom = y + H - 10;
+                  List<Module> mods = ModuleManager.of(sel);
+                  int total = 0;
+                  for (Module m : mods) total += ROW + 4 + (m.open ? m.settings.size() * SL + 4 : 0);
+                  scroll = Math.max(0, Math.min(scroll, Math.max(0, total - (bottom - top))));
+
+                  c.enableScissor(cx, top, cx + cw, bottom);
+                  int ry = top - scroll;
+                  boolean inside = in(mx, my, cx, top, cw, bottom - top);
+                  for (Module m : mods) {
+                      boolean hov = inside && in(mx, my, cx, ry, cw, ROW);
+                      c.fill(cx, ry, cx + cw, ry + ROW, hov ? 0xFF211D29 : 0xFF1A1620);
+                      if (m.enabled) c.fill(cx, ry, cx + 3, ry + ROW, acc);
+                      c.drawText(textRenderer, m.name, cx + 12, ry + 9, m.enabled ? 0xFFFFFFFF : 0xFFA9A3B5, false);
+                      if (!m.settings.isEmpty()) c.drawText(textRenderer, m.open ? "-" : "+", cx + cw - 52, ry + 9, 0xFF77727F, false);
+                      // pill
+                      int px = cx + cw - 34, py = ry + 7;
+                      c.fill(px, py, px + 26, py + 12, m.enabled ? acc : 0xFF2C2735);
+                      int kx = m.enabled ? px + 15 : px + 2;
+                      c.fill(kx, py + 2, kx + 9, py + 10, 0xFFFFFFFF);
+                      if (inside && click) {
+                          if (in(mx, my, px - 4, ry, 38, ROW)) m.toggle();
+                          else if (in(mx, my, cx, ry, cw, ROW) && !m.settings.isEmpty()) m.open = !m.open;
+                      }
+                      ry += ROW + 4;
+                      if (m.open) {
+                          for (Setting s : m.settings) {
+                              int bx = cx + 12, bw = cw - 24, by = ry + 14;
+                              double f = (s.value - s.min) / (s.max - s.min);
+                              c.drawText(textRenderer, s.name, bx, ry + 2, 0xFF9A94A6, false);
+                              String v = String.format("%.2f", s.value);
+                              c.drawText(textRenderer, v, bx + bw - textRenderer.getWidth(v), ry + 2, 0xFFE8E4EE, false);
+                              c.fill(bx, by, bx + bw, by + 4, 0xFF2C2735);
+                              c.fill(bx, by, bx + (int) (bw * f), by + 4, acc);
+                              c.fill(bx + (int) (bw * f) - 2, by - 2, bx + (int) (bw * f) + 2, by + 6, 0xFFFFFFFF);
+                              if (inside && click && in(mx, my, bx - 2, by - 4, bw + 4, 12)) dragging = s;
+                              if (dragging == s) {
+                                  double nf = Math.max(0, Math.min(1, (mx - bx) / (double) bw));
+                                  s.value = Math.round((s.min + (s.max - s.min) * nf) * 100.0) / 100.0;
+                              }
+                              ry += SL;
+                          }
+                          ry += 4;
+                      }
+                  }
+                  c.disableScissor();
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Module.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import java.util.*;
+          import net.minecraft.client.MinecraftClient;
+          public abstract class Module {
+              protected static final MinecraftClient mc = MinecraftClient.getInstance();
+              public final String name; public final Category cat;
+              public boolean enabled, open;
+              public final List<Setting> settings = new ArrayList<>();
+              protected Module(String n, Category c) { name = n; cat = c; }
+              protected Setting add(String n, double v, double mn, double mx) { Setting s = new Setting(n, v, mn, mx); settings.add(s); return s; }
+              public void toggle() { enabled = !enabled; if (enabled) onEnable(); else onDisable(); }
+              public void onEnable() {}
+              public void onDisable() {}
+              public void onTick() {}
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/ModuleManager.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import java.util.*;
+          import net.minecraft.block.BlockState;
+          import net.minecraft.entity.player.PlayerEntity;
+          import net.minecraft.item.Items;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.hit.BlockHitResult;
+          import net.minecraft.util.hit.EntityHitResult;
+          import net.minecraft.util.math.MathHelper;
+
+          public final class ModuleManager {
+              public static final List<Module> all = new ArrayList<>();
+
+              public static void init() {
+                  // ---- Combat (order requested) ----
+                  all.add(new TriggerBot());
+                  all.add(new AimAssist());
+                  all.add(new AutoMace());
+                  all.add(new MaceSwap());
+                  all.add(new BreachSwap());
+                  all.add(new SpearLungeAuto());
+                  all.add(new SpearReach());
+                  // ---- Misc ----
+                  all.add(new AutoTool());
+                  all.add(new KeyPearl());
+                  // ---- Movement ----
+                  all.add(new Sprint());
+                  // ---- Visual ----
+                  all.add(new Hud());
+                  all.add(new Snow());
+                  all.add(new CursorOrbit());
+              }
+              public static List<Module> of(Category c) { List<Module> l = new ArrayList<>(); for (Module m : all) if (m.cat == c) l.add(m); return l; }
+              public static boolean on(String n) { for (Module m : all) if (m.name.equals(n)) return m.enabled; return false; }
+
+              // Fires on whatever you are looking at. Goes through the attack hook, so Mace Swap / Breach Swap apply.
+              static class TriggerBot extends Module {
+                  final Setting cd = add("Cooldown", 0.92, 0.5, 1.0);
+                  TriggerBot() { super("Trigger Bot", Category.COMBAT); }
+                  @Override public void onTick() {
+                      if (mc.currentScreen != null) return;
+                      if (mc.crosshairTarget instanceof EntityHitResult r && r.getEntity() instanceof PlayerEntity t && t.isAlive()) {
+                          if (mc.player.getAttackCooldownProgress(0.5f) >= cd.value) Combat.attack(t);
+                      }
+                  }
+              }
+
+              static class AimAssist extends Module {
+                  final Setting range = add("Range", 4.5, 2, 8), fov = add("FOV", 90, 20, 360), speed = add("Speed", 0.25, 0.05, 1.0);
+                  AimAssist() { super("Aim Assist", Category.COMBAT); }
+                  @Override public void onTick() {
+                      if (mc.currentScreen != null || !mc.options.attackKey.isPressed()) return;
+                      PlayerEntity t = Combat.nearest(range.value, fov.value);
+                      if (t == null) return;
+                      float dy = MathHelper.wrapDegrees(Combat.yawTo(t) - mc.player.getYaw());
+                      float dp = Combat.pitchTo(t) - mc.player.getPitch();
+                      mc.player.setYaw(mc.player.getYaw() + dy * (float) speed.value);
+                      mc.player.setPitch(MathHelper.clamp(mc.player.getPitch() + dp * (float) speed.value, -90f, 90f));
+                  }
+              }
+
+              // Falling + target in reach -> mace in hand -> hit.
+              static class AutoMace extends Module {
+                  final Setting reach = add("Reach", 3.0, 2, 4), fall = add("Min fall", 1.6, 1.5, 6), delay = add("Delay", 10, 2, 30);
+                  int t;
+                  AutoMace() { super("Auto Mace", Category.COMBAT); }
+                  @Override public void onTick() {
+                      t++;
+                      if (mc.currentScreen != null || mc.player.isOnGround() || mc.player.fallDistance < fall.value || t < delay.value) return;
+                      PlayerEntity target = Combat.nearest(reach.value, 360);
+                      if (target == null || Swap.find(Swap::isMace) < 0) return;
+                      Swap.forAttack(target, true);
+                      if (Swap.isMace(mc.player.getMainHandStack())) { Combat.attack(target); t = 0; }
+                  }
+              }
+
+              // Swaps to the mace for any hit you make while falling (manual, Trigger Bot or Auto Mace).
+              static class MaceSwap extends Module { MaceSwap() { super("Mace Swap", Category.COMBAT); } }
+
+              // Not falling and the target wears armor -> swaps to a Breach mace.
+              static class BreachSwap extends Module { BreachSwap() { super("Breach Swap", Category.COMBAT); } }
+
+              static class SpearLungeAuto extends Module {
+                  final Setting range = add("Range", 6.0, 3, 8), delay = add("Delay", 14, 4, 40);
+                  int t;
+                  SpearLungeAuto() { super("Spear Lunge Auto", Category.COMBAT); }
+                  @Override public void onTick() {
+                      t++;
+                      if (mc.currentScreen != null || !mc.player.isSprinting() || t < delay.value) return;
+                      int s = Swap.find(Swap::isSpear); if (s < 0) return;
+                      PlayerEntity target = Combat.nearest(range.value, 120);
+                      if (target == null || Combat.dist(target) < 2.5) return;
+                      Swap.select(s); Combat.attack(target); t = 0;
+                  }
+              }
+
+              static class SpearReach extends Module {
+                  final Setting range = add("Range", 4.5, 3, 6), delay = add("Delay", 12, 4, 40);
+                  int t;
+                  SpearReach() { super("Spear Reach", Category.COMBAT); }
+                  @Override public void onTick() {
+                      t++;
+                      if (mc.currentScreen != null || t < delay.value) return;
+                      int s = Swap.find(Swap::isSpear); if (s < 0) return;
+                      PlayerEntity target = Combat.nearest(range.value, 90);
+                      if (target == null || Combat.dist(target) <= 3.0) return;
+                      Swap.select(s); Combat.attack(target); t = 0;
+                  }
+              }
+
+              static class AutoTool extends Module {
+                  AutoTool() { super("Auto Tool", Category.MISC); }
+                  @Override public void onTick() {
+                      if (mc.currentScreen != null || !mc.options.attackKey.isPressed()) return;
+                      if (!(mc.crosshairTarget instanceof BlockHitResult r)) return;
+                      BlockState st = mc.world.getBlockState(r.getBlockPos());
+                      var inv = mc.player.getInventory(); int best = inv.getSelectedSlot(); float bs = inv.getStack(best).getMiningSpeedMultiplier(st);
+                      for (int i = 0; i < 9; i++) { float s = inv.getStack(i).getMiningSpeedMultiplier(st); if (s > bs) { bs = s; best = i; } }
+                      inv.setSelectedSlot(best);
+                  }
+              }
+
+              // Toggle it on = throws a pearl, then turns itself off.
+              static class KeyPearl extends Module {
+                  KeyPearl() { super("Key Pearl", Category.MISC); }
+                  @Override public void onEnable() {
+                      if (mc.player != null) {
+                          int s = Swap.find(x -> x.isOf(Items.ENDER_PEARL));
+                          if (s >= 0) { Swap.select(s); mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND); mc.player.swingHand(Hand.MAIN_HAND); }
+                      }
+                      enabled = false;
+                  }
+              }
+
+              static class Sprint extends Module {
+                  Sprint() { super("Sprint", Category.MOVEMENT); }
+                  @Override public void onTick() {
+                      var p = mc.player;
+                      if (mc.options.forwardKey.isPressed() && !p.isSneaking() && !p.horizontalCollision && p.getHungerManager().getFoodLevel() > 6) p.setSprinting(true);
+                  }
+              }
+
+              static class Hud extends Module { Hud() { super("Hud", Category.VISUAL); } }
+
+              // Drawn by Fx (snow falls over every screen and the game view).
+              static class Snow extends Module {
+                  Snow() { super("Snow", Category.VISUAL); add("Amount", 120, 20, 400); add("Speed", 1.0, 0.2, 3.0); add("Size", 2, 1, 4); }
+              }
+
+              // Dots orbit the mouse cursor on screens and the crosshair in game.
+              static class CursorOrbit extends Module {
+                  CursorOrbit() { super("Cursor Orbit", Category.VISUAL); add("Dots", 6, 2, 16); add("Radius", 14, 6, 40); add("Speed", 1.5, 0.3, 5.0); add("Size", 2, 1, 4); }
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Setting.java' <<'KITTY_EOF'
+          package lia.kitty;
+          public class Setting {
+              public final String name; public double value; public final double min, max;
+              public Setting(String n, double v, double mn, double mx) { name = n; value = v; min = mn; max = mx; }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Swap.java' <<'KITTY_EOF'
+          package lia.kitty;
+          import java.util.function.Predicate;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.enchantment.EnchantmentHelper;
+          import net.minecraft.enchantment.Enchantments;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.item.Items;
+          import net.minecraft.registry.Registries;
+          import net.minecraft.registry.RegistryKeys;
+
+          public final class Swap {
+              static final MinecraftClient mc = MinecraftClient.getInstance();
+              static int back = -1, wait = 0;
+
+              public static boolean isMace(ItemStack s) { return s.isOf(Items.MACE); }
+              public static boolean isSpear(ItemStack s) { return Registries.ITEM.getId(s.getItem()).getPath().endsWith("_spear"); }
+              public static boolean hasBreach(ItemStack s) {
+                  try {
+                      var reg = mc.world.getRegistryManager().getOrThrow(RegistryKeys.ENCHANTMENT);
+                      return EnchantmentHelper.getLevel(reg.getOrThrow(Enchantments.BREACH), s) > 0;
+                  } catch (Throwable t) { return false; }
+              }
+              public static int find(Predicate<ItemStack> f) {
+                  for (int i = 0; i < 9; i++) if (f.test(mc.player.getInventory().getStack(i))) return i;
+                  return -1;
+              }
+              public static void select(int slot) {
+                  if (slot < 0 || slot > 8) return;
+                  int cur = mc.player.getInventory().getSelectedSlot();
+                  if (slot == cur) return;
+                  if (back < 0) back = cur;
+                  mc.player.getInventory().setSelectedSlot(slot);
+                  wait = 2;
+              }
+              public static void tick() {
+                  if (mc.player == null) { back = -1; return; }
+                  if (back >= 0 && --wait <= 0) { mc.player.getInventory().setSelectedSlot(back); back = -1; }
+              }
+              public static boolean falling() { return !mc.player.isOnGround() && mc.player.fallDistance > 1.5; }
+
+              /** Called right before any attack on a living entity (manual, Trigger Bot, Auto Mace). */
+              public static void forAttack(LivingEntity t, boolean forceMace) {
+                  if (mc.player == null) return;
+                  boolean fall = falling();
+                  if (fall && (forceMace || ModuleManager.on("Mace Swap"))) {
+                      int s = find(x -> isMace(x) && !hasBreach(x));
+                      if (s < 0) s = find(Swap::isMace);
+                      if (s >= 0) { select(s); return; }
+                  }
+                  if (!fall && ModuleManager.on("Breach Swap") && t.getArmor() > 0) {
+                      int s = find(x -> isMace(x) && hasBreach(x));
+                      if (s >= 0) select(s);
+                  }
+              }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/java/lia/kitty'
+          cat > 'src/main/java/lia/kitty/Theme.java' <<'KITTY_EOF'
+          package lia.kitty;
+          public final class Theme {
+              public static final String[] NAMES = {"Kitty", "Ocean", "Mint", "Ember", "Violet"};
+              public static final int[] COLS = {0xFFFF7AC8, 0xFF4DA3FF, 0xFF4DE0B0, 0xFFFF8A4D, 0xFFA78BFA};
+              public static int index = 0;
+              public static int accent() { return COLS[index]; }
+              public static String name() { return NAMES[index]; }
+              public static void next() { index = (index + 1) % COLS.length; }
+          }
+          KITTY_EOF
+          mkdir -p 'src/main/resources'
+          cat > 'src/main/resources/fabric.mod.json' <<'KITTY_EOF'
+          {
+            "schemaVersion": 1,
+            "id": "kittylia",
+            "version": "${version}",
+            "name": "kitty.lia",
+            "description": "kitty.lia client",
+            "environment": "client",
+            "entrypoints": { "client": ["lia.kitty.KittyLia"] },
+            "depends": {
+              "fabricloader": ">=0.18.1",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          KITTY_EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.5.1
+      - name: Build
+        run: gradle build --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kitty.lia-1.21.11
+          path: build/libs/*.jar
