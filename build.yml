@@ -1,0 +1,66 @@
+name: Build Client JAR
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:   # lets you press "Run workflow" manually in the Actions tab
+
+permissions:
+  contents: write      # needed only for the release step at the bottom
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # MC 1.20.5+ needs Java 21. For 1.20.1 or older, change this to 17.
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build
+        run: ./gradlew build --stacktrace --no-daemon
+
+      # Upload the real mod jar only (skip -sources and -dev jars)
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-jar
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
+            !build/libs/*-dev.jar
+          if-no-files-found: error
+
+      # If the build fails, grab the compiler errors so you can read them
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            build/reports/
+            **/hs_err_pid*.log
+
+      # Pushing a tag like v1.0.0 publishes the jar as a GitHub Release
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
+            !build/libs/*-dev.jar
